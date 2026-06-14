@@ -505,9 +505,30 @@ async function renderView(gistId) {
       $('#edit-btn').onclick = () => renderEditMode();
       const del = $('#delete-link');
       if (del) {
+        let deleteConfirming = false;
         del.onclick = async e => {
           e.preventDefault();
-          if (!confirm('确定删除这个短链接？')) return;
+          if (!deleteConfirming) {
+            // First click: enter confirmation mode
+            deleteConfirming = true;
+            del.classList.add('btn-danger-solid');
+            del.innerHTML = `${Icons.alert} 确认删除`;
+            const cancelBtn = document.createElement('button');
+            cancelBtn.className = 'btn btn-ghost btn-sm';
+            cancelBtn.id = 'delete-cancel-btn';
+            cancelBtn.innerHTML = '取消';
+            cancelBtn.onclick = ev => {
+              ev.preventDefault();
+              ev.stopPropagation();
+              deleteConfirming = false;
+              del.classList.remove('btn-danger-solid');
+              del.innerHTML = `${Icons.trash} 删除`;
+              cancelBtn.remove();
+            };
+            del.parentNode.insertBefore(cancelBtn, del.nextSibling);
+            return;
+          }
+          // Second click: actually delete
           try {
             await api('DELETE', `${GIST_API}/${gistId}`);
             addOptiDelete(gistId);
@@ -584,7 +605,6 @@ async function renderList(username) {
     // Merge optimistic creates & deletes so list is instant, no CDN wait
     const optiDeletes = new Set(loadOptiDeletes());
     const optiCreates = loadOptiCreates().filter(c => !apiIds.has(c.id));
-    // Prepend optimistic creates, filter out recently-deleted
     const merged = [...optiCreates.map(c => ({ id: c.id, desc: c.desc, date: c.date.slice(0, 10) })),
                    ...itemData.filter(d => !optiDeletes.has(d.id))];
     cleanOptiState(apiIds);
@@ -604,6 +624,10 @@ async function renderList(username) {
 
     const searchIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
 
+    // Batch state
+    let selected = new Set();
+    let batchConfirming = false;
+
     function renderListItems(filterText) {
       const q = (filterText || '').toLowerCase();
       const filtered = q ? merged.filter(d => d.desc.toLowerCase().includes(q)) : merged;
@@ -615,6 +639,10 @@ async function renderList(username) {
         const preview = g.desc || '(空)';
         h += `
           <li>
+            <label class="list-check" data-id="${esc(g.id)}">
+              <input type="checkbox" data-id="${esc(g.id)}" ${selected.has(g.id) ? 'checked' : ''}>
+              <span class="checkmark"></span>
+            </label>
             <span class="code">${esc(g.id).slice(0, 8)}</span>
             <div class="shortlist-info">
               <span class="preview-text">${esc(preview)}</span>
@@ -628,6 +656,32 @@ async function renderList(username) {
       return h;
     }
 
+    function updateBatchBar() {
+      const bar = $('#batch-bar');
+      if (!bar) return;
+      const delBtn = $('#batch-delete-btn');
+      const confBtn = $('#batch-confirm-btn');
+      const cancBtn = $('#batch-cancel-btn');
+      const count = $('#batch-count');
+
+      if (batchConfirming && selected.size) {
+        bar.style.display = 'flex';
+        count.textContent = `确认删除 ${selected.size} 项？`;
+        delBtn.style.display = 'none';
+        confBtn.style.display = '';
+        cancBtn.style.display = '';
+      } else if (selected.size) {
+        bar.style.display = 'flex';
+        count.textContent = `已选 ${selected.size} 项`;
+        delBtn.style.display = '';
+        confBtn.style.display = 'none';
+        cancBtn.style.display = 'none';
+      } else {
+        bar.style.display = 'none';
+        batchConfirming = false;
+      }
+    }
+
     let html = `
       <div class="logo">${Icons.link}<span>${esc(username)} 的短链接</span></div>
       <div class="card fade-in">
@@ -635,12 +689,60 @@ async function renderList(username) {
           ${searchIcon}
           <input type="search" id="list-search" class="search-input" placeholder="搜索 ${merged.length} 条短链接..." autocomplete="off">
         </div>
+        <div class="batch-bar" id="batch-bar" style="display:none">
+          <span class="batch-count" id="batch-count"></span>
+          <button class="btn-sm" id="batch-delete-btn" style="color:var(--color-danger)">${Icons.trash} 批量删除</button>
+          <button class="btn-sm btn-danger-solid" id="batch-confirm-btn" style="display:none">确认删除</button>
+          <button class="btn-sm" id="batch-cancel-btn" style="display:none">取消</button>
+        </div>
         <div id="list-items">${renderListItems('')}</div>
       </div>
       <div class="spacer"><a class="link" href=".">${Icons.arrowLeft} 创建新的</a></div>`;
 
     app.innerHTML = html;
 
+    updateBatchBar();
+
+    // Checkbox change — event delegation on list-items
+    $('#list-items').addEventListener('change', e => {
+      if (e.target.type === 'checkbox' && e.target.dataset.id) {
+        if (e.target.checked) selected.add(e.target.dataset.id);
+        else selected.delete(e.target.dataset.id);
+        updateBatchBar();
+      }
+    });
+
+    // Batch delete button
+    $('#batch-delete-btn').onclick = () => {
+      batchConfirming = true;
+      updateBatchBar();
+    };
+
+    $('#batch-cancel-btn').onclick = () => {
+      batchConfirming = false;
+      updateBatchBar();
+    };
+
+    $('#batch-confirm-btn').onclick = async () => {
+      const ids = [...selected];
+      const total = ids.length;
+      let deleted = 0;
+      for (const id of ids) {
+        try {
+          await api('DELETE', `${GIST_API}/${id}`);
+          addOptiDelete(id);
+          deleted++;
+        } catch (err) {
+          toast(`删除 ${id.slice(0, 8)} 失败`, Icons.alert);
+        }
+      }
+      if (deleted) toast(`已删除 ${deleted} / ${total} 项`, Icons.check);
+      selected.clear();
+      batchConfirming = false;
+      renderList(username);
+    };
+
+    // Search input
     $('#list-search').oninput = function() {
       $('#list-items').innerHTML = renderListItems(this.value);
     };
