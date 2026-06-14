@@ -111,7 +111,9 @@ async function api(method, url, body) {
     }
     throw new Error(msg);
   }
-  return res.json();
+  const text = await res.text();
+  if (!text) return null;
+  return JSON.parse(text);
 }
 
 // --- image compression ---
