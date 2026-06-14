@@ -6,6 +6,22 @@ const DATA_FILE = 'shortlink.json';
 let token = localStorage.getItem('gh_token') || '';
 let files = [];
 
+// --- view counter (localStorage-based link visit tracking) ---
+const VIEWS_KEY = 'link_views';
+
+function getViews() {
+  try { return JSON.parse(localStorage.getItem(VIEWS_KEY) || '{}'); }
+  catch { return {}; }
+}
+function incrementView(gistId) {
+  const v = getViews();
+  v[gistId] = (v[gistId] || 0) + 1;
+  localStorage.setItem(VIEWS_KEY, JSON.stringify(v));
+}
+function getViewCount(gistId) {
+  return getViews()[gistId] || 0;
+}
+
 // --- optimistic cache (bridges GitHub's eventually-consistent list API) ---
 // After create/delete, GitHub's GET /users/{user}/gists can be stale for seconds.
 // We track recent writes in sessionStorage so the list page renders instantly.
@@ -46,15 +62,25 @@ function cleanOptiState(apiIds) {
   saveOptiDeletes(deletes);
 }
 
-const THEMES = ['midnight', 'daylight', 'sepia', 'ocean', 'cherry'];
+const THEMES = ['auto', 'midnight', 'daylight', 'sepia', 'ocean', 'cherry'];
 
 function getTheme() {
-  return localStorage.getItem('theme') || 'midnight';
+  const t = localStorage.getItem('theme') || 'auto';
+  return t === 'auto' ? resolveAuto() : t;
+}
+
+function resolveAuto() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'midnight' : 'daylight';
 }
 
 function setTheme(name) {
   localStorage.setItem('theme', name);
-  document.documentElement.setAttribute('data-theme', name);
+  applyTheme(name);
+}
+
+function applyTheme(name) {
+  const effective = name === 'auto' ? resolveAuto() : name;
+  document.documentElement.setAttribute('data-theme', effective);
 }
 
 // --- helpers ---
@@ -346,6 +372,7 @@ async function renderView(gistId) {
       </div>`);
 
     const data = JSON.parse(file.content);
+    incrementView(gistId);
     const date = data.created ? data.created.slice(0, 16).replace('T', ' ') : '';
     let editFiles = [];
 
@@ -595,40 +622,26 @@ async function renderList(username) {
   `;
 
   try {
-    const gists = await api('GET', `https://api.github.com/users/${username}/gists?per_page=100`);
-    const items = gists.filter(g => g.files?.[DATA_FILE]);
-    const apiIds = new Set(items.map(g => g.id));
-    const itemData = items.map(g => ({
-      id: g.id,
-      desc: (g.description || '').replace(/^\[sl\]\s*/, ''),
-      date: g.created_at ? g.created_at.slice(0, 10) : ''
-    }));
-
-    // Merge optimistic creates & deletes so list is instant, no CDN wait
-    const optiDeletes = new Set(loadOptiDeletes());
-    const optiCreates = loadOptiCreates().filter(c => !apiIds.has(c.id));
-    const merged = [...optiCreates.map(c => ({ id: c.id, desc: c.desc, date: c.date.slice(0, 10) })),
-                   ...itemData.filter(d => !optiDeletes.has(d.id))];
-    cleanOptiState(apiIds);
-
-    if (!merged.length) {
-      app.innerHTML = `
-        <div class="logo">${Icons.link}<span>${esc(username)} 的短链接</span></div>
-        <div class="card fade-in">
-          <div class="empty-state">
-            ${Icons.folder}
-            <p>还没有创建过短链接</p>
-            <a class="btn btn-secondary" href=".">${Icons.arrowLeft} 创建新的</a>
-          </div>
-        </div>`;
-      return;
-    }
-
-    const searchIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
+    const PER_PAGE = 20;
+    let allApiItems = [];
+    let allApiIds = new Set();
+    let currentPage = 0;
+    let hasMore = true;
+    let merged = [];
 
     // Batch state
     let selected = new Set();
     let batchConfirming = false;
+
+    const searchIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
+
+    function rebuildMerged() {
+      const optiDeletes = new Set(loadOptiDeletes());
+      const optiCreates = loadOptiCreates().filter(c => !allApiIds.has(c.id));
+      merged = [...optiCreates.map(c => ({ id: c.id, desc: c.desc, date: c.date.slice(0, 10) })),
+                ...allApiItems.filter(d => !optiDeletes.has(d.id))];
+      cleanOptiState(allApiIds);
+    }
 
     function renderListItems(filterText) {
       const q = (filterText || '').toLowerCase();
@@ -639,6 +652,8 @@ async function renderList(username) {
       let h = `<ul class="shortlist">`;
       filtered.forEach(g => {
         const preview = g.desc || '(空)';
+        const vc = getViewCount(g.id);
+        const vBadge = vc ? `<span class="view-badge" title="访问 ${vc} 次">👁 ${vc}</span>` : '';
         h += `
           <li>
             <label class="list-check" data-id="${esc(g.id)}">
@@ -648,7 +663,7 @@ async function renderList(username) {
             <span class="code">${esc(g.id).slice(0, 8)}</span>
             <div class="shortlist-info">
               <span class="preview-text">${esc(preview)}</span>
-              <span class="date">${esc(g.date)}</span>
+              <span class="date">${vBadge}${esc(g.date)}</span>
             </div>
             <a class="btn-sm" href="?s=${esc(g.id)}" style="text-decoration:none;flex-shrink:0">查看 ${Icons.externalLink}</a>
           </li>`;
@@ -665,7 +680,6 @@ async function renderList(username) {
       const confBtn = $('#batch-confirm-btn');
       const cancBtn = $('#batch-cancel-btn');
       const count = $('#batch-count');
-
       if (batchConfirming && selected.size) {
         bar.style.display = 'flex';
         count.textContent = `确认删除 ${selected.size} 项？`;
@@ -684,70 +698,106 @@ async function renderList(username) {
       }
     }
 
-    let html = `
-      <div class="logo">${Icons.link}<span>${esc(username)} 的短链接</span></div>
-      <div class="card fade-in">
-        <div class="search-bar">
-          ${searchIcon}
-          <input type="search" id="list-search" class="search-input" placeholder="搜索 ${merged.length} 条短链接..." autocomplete="off">
+    function buildHtml() {
+      let html = `
+        <div class="logo">${Icons.link}<span>${esc(username)} 的短链接</span></div>
+        <div class="card fade-in">
+          <div class="search-bar">
+            ${searchIcon}
+            <input type="search" id="list-search" class="search-input" placeholder="搜索 ${merged.length} 条短链接..." autocomplete="off">
+          </div>
+          <div class="batch-bar" id="batch-bar" style="display:none">
+            <span class="batch-count" id="batch-count"></span>
+            <button class="btn-sm" id="batch-delete-btn" style="color:var(--color-danger)">${Icons.trash} 批量删除</button>
+            <button class="btn-sm btn-danger-solid" id="batch-confirm-btn" style="display:none">确认删除</button>
+            <button class="btn-sm" id="batch-cancel-btn" style="display:none">取消</button>
+          </div>
+          <div id="list-items">${renderListItems('')}</div>
+          ${hasMore ? `<div class="spacer" style="text-align:center"><button class="btn btn-secondary" id="load-more-btn" style="width:100%">加载更多 (${merged.length} / ?)</button></div>` : `<p class="dim spacer" style="text-align:center">共 ${merged.length} 条</p>`}
         </div>
-        <div class="batch-bar" id="batch-bar" style="display:none">
-          <span class="batch-count" id="batch-count"></span>
-          <button class="btn-sm" id="batch-delete-btn" style="color:var(--color-danger)">${Icons.trash} 批量删除</button>
-          <button class="btn-sm btn-danger-solid" id="batch-confirm-btn" style="display:none">确认删除</button>
-          <button class="btn-sm" id="batch-cancel-btn" style="display:none">取消</button>
-        </div>
-        <div id="list-items">${renderListItems('')}</div>
-      </div>
-      <div class="spacer"><a class="link" href=".">${Icons.arrowLeft} 创建新的</a></div>`;
+        <div class="spacer"><a class="link" href=".">${Icons.arrowLeft} 创建新的</a></div>`;
+      return html;
+    }
 
-    app.innerHTML = html;
-
-    updateBatchBar();
-
-    // Checkbox change — event delegation on list-items
-    $('#list-items').addEventListener('change', e => {
-      if (e.target.type === 'checkbox' && e.target.dataset.id) {
-        if (e.target.checked) selected.add(e.target.dataset.id);
-        else selected.delete(e.target.dataset.id);
-        updateBatchBar();
-      }
-    });
-
-    // Batch delete button
-    $('#batch-delete-btn').onclick = () => {
-      batchConfirming = true;
+    function bindEvents() {
       updateBatchBar();
-    };
 
-    $('#batch-cancel-btn').onclick = () => {
-      batchConfirming = false;
-      updateBatchBar();
-    };
-
-    $('#batch-confirm-btn').onclick = async () => {
-      const ids = [...selected];
-      const total = ids.length;
-      let deleted = 0;
-      for (const id of ids) {
-        try {
-          await api('DELETE', `${GIST_API}/${id}`);
-          addOptiDelete(id);
-          deleted++;
-        } catch (err) {
-          toast(`删除 ${id.slice(0, 8)} 失败`, Icons.alert);
+      $('#list-items').addEventListener('change', e => {
+        if (e.target.type === 'checkbox' && e.target.dataset.id) {
+          if (e.target.checked) selected.add(e.target.dataset.id);
+          else selected.delete(e.target.dataset.id);
+          updateBatchBar();
         }
-      }
-      if (deleted) toast(`已删除 ${deleted} / ${total} 项`, Icons.check);
-      selected.clear();
-      batchConfirming = false;
-      renderList(username);
-    };
+      });
 
-    // Search input
-    $('#list-search').oninput = function() {
-      $('#list-items').innerHTML = renderListItems(this.value);
-    };
+      $('#batch-delete-btn').onclick = () => { batchConfirming = true; updateBatchBar(); };
+      $('#batch-cancel-btn').onclick = () => { batchConfirming = false; updateBatchBar(); };
+
+      $('#batch-confirm-btn').onclick = async () => {
+        const ids = [...selected];
+        const total = ids.length;
+        let deleted = 0;
+        for (const id of ids) {
+          try {
+            await api('DELETE', `${GIST_API}/${id}`);
+            addOptiDelete(id);
+            deleted++;
+          } catch (err) {
+            toast(`删除 ${id.slice(0, 8)} 失败`, Icons.alert);
+          }
+        }
+        if (deleted) toast(`已删除 ${deleted} / ${total} 项`, Icons.check);
+        selected.clear();
+        batchConfirming = false;
+        renderList(username);
+      };
+
+      $('#list-search').oninput = function() {
+        $('#list-items').innerHTML = renderListItems(this.value);
+      };
+
+      const loadMore = $('#load-more-btn');
+      if (loadMore) loadMore.onclick = () => loadNextPage();
+    }
+
+    async function loadNextPage() {
+      const btn = $('#load-more-btn');
+      if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> 加载中...`; }
+
+      currentPage++;
+      const gists = await api('GET', `https://api.github.com/users/${username}/gists?per_page=${PER_PAGE}&page=${currentPage}`);
+      const items = gists.filter(g => g.files?.[DATA_FILE]);
+      hasMore = items.length === PER_PAGE;
+
+      for (const g of items) {
+        allApiIds.add(g.id);
+        allApiItems.push({
+          id: g.id,
+          desc: (g.description || '').replace(/^\[sl\]\s*/, ''),
+          date: g.created_at ? g.created_at.slice(0, 10) : ''
+        });
+      }
+      rebuildMerged();
+
+      if (!merged.length && currentPage === 1) {
+        app.innerHTML = `
+          <div class="logo">${Icons.link}<span>${esc(username)} 的短链接</span></div>
+          <div class="card fade-in">
+            <div class="empty-state">
+              ${Icons.folder}
+              <p>还没有创建过短链接</p>
+              <a class="btn btn-secondary" href=".">${Icons.arrowLeft} 创建新的</a>
+            </div>
+          </div>`;
+        return;
+      }
+
+      app.innerHTML = buildHtml();
+      bindEvents();
+    }
+
+    // Kick off first page
+    await loadNextPage();
   } catch (err) {
     app.innerHTML = `
       <div class="card fade-in">
@@ -762,6 +812,7 @@ async function renderList(username) {
 
 // -- settings page --
 const THEME_PREVIEWS = {
+  auto:     { dots: ['#0F172A','#F8FAFC','#22C55E'], label: '自动' },
   midnight: { dots: ['#0F172A','#1E293B','#22C55E'], label: '暗夜' },
   daylight: { dots: ['#F8FAFC','#E2E8F0','#16A34A'], label: '日光' },
   sepia:    { dots: ['#FDF6E3','#E6D5B8','#2E7D32'], label: '暖纸' },
@@ -845,20 +896,54 @@ function renderSettings() {
   };
 
   $('#clear-token-btn').onclick = () => {
-    if (confirm('确定清除 Token？之后需要重新设置。')) {
+    const btn = $('#clear-token-btn');
+    if (btn._confirming) {
       localStorage.removeItem('gh_token');
       token = '';
       render();
+      return;
     }
+    btn._confirming = true;
+    btn.classList.add('btn-danger-solid');
+    btn.innerHTML = `${Icons.alert} 确认清除`;
+    const cancel = document.createElement('button');
+    cancel.className = 'btn-sm';
+    cancel.id = 'clear-token-cancel';
+    cancel.innerHTML = '取消';
+    cancel.onclick = ev => {
+      ev.stopPropagation();
+      btn._confirming = false;
+      btn.classList.remove('btn-danger-solid');
+      btn.innerHTML = `${Icons.trash} 清除`;
+      cancel.remove();
+    };
+    btn.parentNode.insertBefore(cancel, btn.nextSibling);
   };
 
   // clear all data
   $('#clear-data-btn').onclick = () => {
-    if (confirm('确定清除全部本地数据？这将移除 Token 和主题设置。')) {
+    const btn = $('#clear-data-btn');
+    if (btn._confirming) {
       localStorage.clear();
       token = '';
       render();
+      return;
     }
+    btn._confirming = true;
+    btn.classList.add('btn-danger-solid');
+    btn.innerHTML = `${Icons.alert} 确认清除`;
+    const cancel = document.createElement('button');
+    cancel.className = 'btn-sm';
+    cancel.id = 'clear-data-cancel';
+    cancel.innerHTML = '取消';
+    cancel.onclick = ev => {
+      ev.stopPropagation();
+      btn._confirming = false;
+      btn.classList.remove('btn-danger-solid');
+      btn.innerHTML = `${Icons.alert} 清除全部本地数据`;
+      cancel.remove();
+    };
+    btn.parentNode.insertBefore(cancel, btn.nextSibling);
   };
 }
 
@@ -868,7 +953,10 @@ function maskToken(t) {
 }
 
 // --- init ---
-document.documentElement.setAttribute('data-theme', getTheme());
+applyTheme(getTheme());
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (getTheme() === 'auto') applyTheme('auto');
+});
 render();
 
 document.addEventListener('keydown', e => {

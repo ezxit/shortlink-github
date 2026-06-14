@@ -705,6 +705,16 @@ code {
 .shortlist .date {
   color: var(--color-text-dim);
   font-size: 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.view-badge {
+  color: var(--color-accent);
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 /* ---- search bar ---- */
