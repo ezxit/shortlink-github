@@ -3,7 +3,7 @@ const GIST_API = 'https://api.github.com/gists';
 const DATA_FILE = 'shortlink.json';
 
 // --- state ---
-let token = localStorage.getItem('gh_token') || '';
+let token = localStorage.getItem('gh_token') || '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';
 let files = [];
 
 // --- view counter (localStorage-based link visit tracking) ---
