@@ -1,9 +1,32 @@
 // --- config ---
-const GIST_API = 'https://api.github.com/gists';
-const DATA_FILE = 'shortlink.json';
+const SUPABASE_URL = localStorage.getItem('sb_url') || 'https://vhifkvzmujbhcdwjixdj.supabase.co';
+const SUPABASE_ANON_KEY = localStorage.getItem('sb_anon_key') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZoaWZrdnptdWpiaGNkd2ppeGRqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0ODgzOTYsImV4cCI6MjA5NzA2NDM5Nn0.nZ7zBk3p_Fh5Q88makO5OmHJFCJ2uG_0inIZ8kmq-zc';
+const configured = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+
+async function sb(path, method, body) {
+  const headers = {
+    'apikey': SUPABASE_ANON_KEY,
+    'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+  };
+  if (body) headers['Content-Type'] = 'application/json';
+  if (method === 'POST') headers['Prefer'] = 'return=representation';
+  const opts = { method, headers };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, opts);
+  if (!res.ok) {
+    const text = await res.text();
+    let msg;
+    try { msg = JSON.parse(text).message || `请求失败 (${res.status})`; }
+    catch { msg = `请求失败 (${res.status})`; }
+    throw new Error(msg);
+  }
+  if (res.status === 204) return null;
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
 
 // --- state ---
-let token = localStorage.getItem('gh_token') || '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';
+let namespace = localStorage.getItem('sb_namespace') || 'default';
 let files = [];
 
 // --- view counter (localStorage-based link visit tracking) ---
@@ -22,12 +45,10 @@ function getViewCount(gistId) {
   return getViews()[gistId] || 0;
 }
 
-// --- optimistic cache (bridges GitHub's eventually-consistent list API) ---
-// After create/delete, GitHub's GET /users/{user}/gists can be stale for seconds.
-// We track recent writes in sessionStorage so the list page renders instantly.
+// --- optimistic cache (bridges eventual-consistency gaps after mutations) ---
 const OPTI_CREATES_KEY = 'opti_creates';
 const OPTI_DELETES_KEY = 'opti_deletes';
-const OPTI_MAX_AGE_MS = 10 * 60 * 1000; // 10 min
+const OPTI_MAX_AGE_MS = 10 * 60 * 1000;
 
 function loadOptiCreates() {
   try { return JSON.parse(sessionStorage.getItem(OPTI_CREATES_KEY) || '[]'); }
@@ -40,23 +61,21 @@ function loadOptiDeletes() {
 }
 function saveOptiDeletes(ids) { sessionStorage.setItem(OPTI_DELETES_KEY, JSON.stringify(ids)); }
 
-function addOptiCreate(gistId, desc, date) {
+function addOptiCreate(id, desc, date) {
   const items = loadOptiCreates();
-  items.unshift({ id: gistId, desc, date, ts: Date.now() });
+  items.unshift({ id, desc, date, ts: Date.now() });
   saveOptiCreates(items);
 }
-function addOptiDelete(gistId) {
+function addOptiDelete(id) {
   const ids = loadOptiDeletes();
-  if (!ids.includes(gistId)) ids.push(gistId);
+  if (!ids.includes(id)) ids.push(id);
   saveOptiDeletes(ids);
 }
 function cleanOptiState(apiIds) {
-  // Remove creates that are now in the API or too old
   const now = Date.now();
   let creates = loadOptiCreates();
   creates = creates.filter(c => !apiIds.has(c.id) && (now - c.ts) < OPTI_MAX_AGE_MS);
   saveOptiCreates(creates);
-  // Remove deletes for IDs no longer in the API (already consistent)
   let deletes = loadOptiDeletes();
   deletes = deletes.filter(id => apiIds.has(id));
   saveOptiDeletes(deletes);
@@ -105,6 +124,7 @@ const Icons = {
   shield: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
   key: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`,
   alert: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+  database: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`,
 };
 
 function toast(msg, icon) {
@@ -115,31 +135,6 @@ function toast(msg, icon) {
   t.classList.add('show');
   clearTimeout(t._tid);
   t._tid = setTimeout(() => t.classList.remove('show'), 3000);
-}
-
-async function api(method, url, body) {
-  const headers = { 'Accept': 'application/vnd.github+json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const opts = { method, headers };
-  if (body) {
-    headers['Content-Type'] = 'application/json';
-    opts.body = JSON.stringify(body);
-  }
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    const text = await res.text();
-    let msg;
-    try {
-      const j = JSON.parse(text);
-      msg = j.message || `请求失败 (${res.status})`;
-    } catch {
-      msg = `请求失败 (${res.status})`;
-    }
-    throw new Error(msg);
-  }
-  const text = await res.text();
-  if (!text) return null;
-  return JSON.parse(text);
 }
 
 // --- image compression ---
@@ -175,10 +170,10 @@ function render() {
   const user = params.get('user');
   const page = params.get('page');
 
+  if (page === 'settings') return renderSettings();
+  if (!configured) return renderSetup();
   if (sid) return renderView(sid);
   if (user) return renderList(user);
-  if (page === 'settings' && token) return renderSettings();
-  if (!token) return renderSetup();
   return renderHome();
 }
 
@@ -187,25 +182,35 @@ function renderSetup() {
   app.innerHTML = `
     <div class="card setup fade-in">
       <div class="logo">${Icons.link}<span>shortlink</span></div>
-      <h2>设置 GitHub Token</h2>
-      <p>需要一个 <code>gist</code> 权限的 token 来创建短链接。<br>
-      去 <a class="link" href="https://github.com/settings/tokens/new?scopes=gist&description=shortlink" target="_blank" rel="noopener">GitHub Settings &rarr; Tokens ${Icons.externalLink}</a> 创建一个，粘贴到下面。</p>
-      <label class="input-label" for="token-input">Personal Access Token</label>
-      <input id="token-input" type="password" placeholder="github_pat_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" aria-describedby="token-hint">
-      <p class="dim spacer-sm" id="token-hint" style="display:flex;align-items:center;gap:6px">${Icons.shield} Token 只存在你浏览器里，不会上传到任何地方。</p>
-      <button class="btn btn-primary spacer" id="save-token" style="width:100%">
-        ${Icons.key} 保存 Token
+      <h2>配置 Supabase</h2>
+      <p>去 <a class="link" href="https://app.supabase.com" target="_blank" rel="noopener">Supabase Dashboard ${Icons.externalLink}</a> 创建项目，<br>然后在 SQL Editor 运行 <code>migration.sql</code>，<br>再把 Project URL 和 Anon Key 粘贴到下面。</p>
+      <label class="input-label" for="sb-url-input">Project URL</label>
+      <input id="sb-url-input" type="text" placeholder="https://xxxxxxxxxxxx.supabase.co" autocomplete="off">
+      <label class="input-label spacer-sm" for="sb-key-input">Anon Key</label>
+      <input id="sb-key-input" type="password" placeholder="eyJhbGciOiJIUzI1NiIs..." autocomplete="off">
+      <label class="input-label spacer-sm" for="sb-ns-input">Namespace（你的用户名，用于管理短链接）</label>
+      <input id="sb-ns-input" type="text" placeholder="my-space" autocomplete="off" value="${esc(namespace)}">
+      <p class="dim spacer-sm" style="display:flex;align-items:center;gap:6px">${Icons.shield} 配置只存在你浏览器里，不会上传到任何地方。</p>
+      <button class="btn btn-primary spacer" id="save-config" style="width:100%">
+        ${Icons.key} 保存配置
       </button>
     </div>
   `;
-  $('#save-token').onclick = () => {
-    token = $('#token-input').value.trim();
-    if (token.length < 10) {
-      return toast('Token 太短了，检查一下是否粘贴完整', Icons.alert);
+  $('#save-config').onclick = () => {
+    const url = $('#sb-url-input').value.trim();
+    const key = $('#sb-key-input').value.trim();
+    const ns = $('#sb-ns-input').value.trim();
+    if (!url || !key) {
+      return toast('Project URL 和 Anon Key 不能为空', Icons.alert);
     }
-    localStorage.setItem('gh_token', token);
-    toast('保存成功', Icons.check);
-    setTimeout(() => render(), 400);
+    if (!ns) {
+      return toast('Namespace 不能为空', Icons.alert);
+    }
+    localStorage.setItem('sb_url', url);
+    localStorage.setItem('sb_anon_key', key);
+    localStorage.setItem('sb_namespace', ns);
+    toast('保存成功，重新加载中...', Icons.check);
+    setTimeout(() => location.reload(), 500);
   };
 }
 
@@ -260,12 +265,7 @@ function bindHomeEvents() {
 
   $('#create-btn').onclick = createShortlink;
   $('#list-btn').onclick = () => {
-    if (token) {
-      fetch('https://api.github.com/user', { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' } })
-        .then(r => r.json())
-        .then(u => { location.search = '?user=' + u.login; })
-        .catch(() => toast('获取用户信息失败', Icons.alert));
-    }
+    location.search = '?user=' + encodeURIComponent(namespace);
   };
 }
 
@@ -315,19 +315,23 @@ async function createShortlink() {
     }
     const images = await Promise.all(files.map(compressImage));
 
-    const data = { text, images, created: new Date().toISOString() };
     const preview = text ? text.slice(0, 60).replace(/\n/g, ' ') : (images.length ? `[${images.length} images]` : '');
+    const created = new Date().toISOString();
 
-    const gist = await api('POST', GIST_API, {
-      description: `[sl] ${preview}`,
-      public: true,
-      files: { [DATA_FILE]: { content: JSON.stringify(data) } }
+    const rows = await sb('shortlinks', 'POST', {
+      text,
+      images,
+      description: preview,
+      namespace,
+      created,
+      created_at: created
     });
 
-    // Optimistic: stash so list page shows it instantly, no waiting for GitHub's CDN
-    addOptiCreate(gist.id, preview, data.created);
+    if (!rows) throw new Error('创建失败');
 
-    const url = `${location.origin}${location.pathname}?s=${gist.id}`;
+    addOptiCreate(rows[0].id, preview, created);
+
+    const url = `${location.origin}${location.pathname}?s=${rows[0].id}`;
     $('#result-url').href = url;
     $('#result-url').textContent = url;
     $('#result').style.display = 'block';
@@ -356,23 +360,25 @@ function skeletonView() {
   `;
 }
 
-async function renderView(gistId) {
+async function renderView(linkId) {
   app.innerHTML = skeletonView();
 
   try {
-    const gist = await api('GET', `${GIST_API}/${gistId}`);
-    const file = gist.files?.[DATA_FILE];
-    if (!file) return (app.innerHTML = `
-      <div class="card fade-in">
-        <div class="empty-state">
-          ${Icons.file}
-          <p>内容不存在</p>
-          <a class="btn btn-secondary" href=".">${Icons.arrowLeft} 返回</a>
-        </div>
-      </div>`);
+    const rows = await sb(`shortlinks?id=eq.${encodeURIComponent(linkId)}&limit=1`, 'GET');
+    const data = rows?.[0];
 
-    const data = JSON.parse(file.content);
-    incrementView(gistId);
+    if (!data) {
+      return (app.innerHTML = `
+        <div class="card fade-in">
+          <div class="empty-state">
+            ${Icons.file}
+            <p>内容不存在</p>
+            <a class="btn btn-secondary" href=".">${Icons.arrowLeft} 返回</a>
+          </div>
+        </div>`);
+    }
+
+    incrementView(linkId);
     const date = data.created ? data.created.slice(0, 16).replace('T', ' ') : '';
     let editFiles = [];
 
@@ -381,7 +387,7 @@ async function renderView(gistId) {
         <div class="card fade-in">
         <div class="view-meta">
           ${Icons.link}
-          <span>s/</span><span class="gist-id">${esc(gistId)}</span>
+          <span>s/</span><span class="gist-id">${esc(linkId)}</span>
           <span>&middot;</span>
           <span>${esc(date)}</span>
         </div>
@@ -401,10 +407,8 @@ async function renderView(gistId) {
 
       html += `<div class="spacer view-actions">`;
       html += `<a class="btn btn-secondary btn-sm" href=".">${Icons.arrowLeft} 创建新的</a>`;
-      if (token) {
-        html += `<button class="btn btn-ghost btn-sm" id="edit-btn">${Icons.settings} 编辑</button>`;
-        html += `<button class="btn btn-danger btn-sm" id="delete-link" aria-label="删除此短链接">${Icons.trash} 删除</button>`;
-      }
+      html += `<button class="btn btn-ghost btn-sm" id="edit-btn">${Icons.settings} 编辑</button>`;
+      html += `<button class="btn btn-danger btn-sm" id="delete-link" aria-label="删除此短链接">${Icons.trash} 删除</button>`;
       html += `</div></div>`;
       app.innerHTML = html;
       bindViewActions();
@@ -418,7 +422,7 @@ async function renderView(gistId) {
           ${Icons.settings}
           <span>编辑</span>
           <span>&middot;</span>
-          <span class="gist-id">s/${esc(gistId).slice(0, 8)}</span>
+          <span class="gist-id">s/${esc(linkId).slice(0, 8)}</span>
         </div>
         <label class="input-label" for="edit-text">文字内容</label>
         <textarea id="edit-text" placeholder="写点什么...">${esc(data.text || '')}</textarea>
@@ -485,7 +489,6 @@ async function renderView(gistId) {
         };
       }
 
-      // remove existing image
       $$('#existing-previews .edit-wrap').forEach(wrap => {
         wrap.onclick = () => {
           const idx = parseInt(wrap.dataset.idx);
@@ -508,15 +511,12 @@ async function renderView(gistId) {
           }
 
           const newImages = editFiles.length ? await Promise.all(editFiles.map(compressImage)) : [];
-          data.text = textVal;
-          if (newImages.length) data.images = [...(data.images || []), ...newImages];
+          const newText = textVal;
+          const newImagesArr = newImages.length ? [...(data.images || []), ...newImages] : (data.images || []);
 
-          const gistDesc = textVal ? textVal.slice(0, 60).replace(/\n/g, ' ') : (data.images?.length ? `[${data.images.length} images]` : '');
+          const desc = newText ? newText.slice(0, 60).replace(/\n/g, ' ') : (newImagesArr.length ? `[${newImagesArr.length} images]` : '');
 
-          await api('PATCH', `${GIST_API}/${gistId}`, {
-            description: `[sl] ${gistDesc}`,
-            files: { [DATA_FILE]: { content: JSON.stringify(data) } }
-          });
+          await sb(`shortlinks?id=eq.${encodeURIComponent(linkId)}`, 'PATCH', { text: newText, images: newImagesArr, description: desc });
 
           toast('已保存', Icons.check);
           renderViewMode();
@@ -538,7 +538,6 @@ async function renderView(gistId) {
         del.onclick = async e => {
           e.preventDefault();
           if (!deleteConfirming) {
-            // First click: enter confirmation mode
             deleteConfirming = true;
             del.classList.add('btn-danger-solid');
             del.innerHTML = `${Icons.alert} 确认删除`;
@@ -557,31 +556,26 @@ async function renderView(gistId) {
             del.parentNode.insertBefore(cancelBtn, del.nextSibling);
             return;
           }
-          // Second click: actually delete
           try {
-            await api('DELETE', `${GIST_API}/${gistId}`);
-            addOptiDelete(gistId);
+            await sb(`shortlinks?id=eq.${encodeURIComponent(linkId)}`, 'DELETE');
+
+            addOptiDelete(linkId);
             app.innerHTML = `
               <div class="card fade-in">
                 <div class="empty-state">
                   ${Icons.check}
                   <p style="font-weight:600;color:var(--color-text)">已删除</p>
-                  <p class="muted">s/${esc(gistId).slice(0, 12)} 已被永久删除</p>
+                  <p class="muted">s/${esc(linkId).slice(0, 12)} 已被永久删除</p>
                   <div class="flex" style="justify-content:center;flex-wrap:wrap">
                     <a class="btn btn-secondary btn-sm" href=".">${Icons.arrowLeft} 创建新的</a>
-                    ${token ? `<button class="btn btn-ghost btn-sm" id="goto-list-btn">${Icons.list} 我的短链接</button>` : ''}
+                    <button class="btn btn-ghost btn-sm" id="goto-list-btn">${Icons.list} 我的短链接</button>
                   </div>
                 </div>
               </div>
             `;
-            if (token) {
-              $('#goto-list-btn').onclick = () => {
-                fetch('https://api.github.com/user', { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' } })
-                  .then(r => r.json())
-                  .then(u => { location.search = '?user=' + u.login; })
-                  .catch(() => toast('获取用户信息失败', Icons.alert));
-              };
-            }
+            $('#goto-list-btn').onclick = () => {
+              location.search = '?user=' + encodeURIComponent(namespace);
+            };
           } catch (err) { toast(err.message, Icons.alert); }
         };
       }
@@ -615,9 +609,9 @@ function skeletonList() {
   `;
 }
 
-async function renderList(username) {
+async function renderList(ns) {
   app.innerHTML = `
-    <div class="logo">${Icons.link}<span>${esc(username)} 的短链接</span></div>
+    <div class="logo">${Icons.link}<span>${esc(ns)} 的短链接</span></div>
     ${skeletonList()}
   `;
 
@@ -629,7 +623,6 @@ async function renderList(username) {
     let hasMore = true;
     let merged = [];
 
-    // Batch state
     let selected = new Set();
     let batchConfirming = false;
 
@@ -700,7 +693,7 @@ async function renderList(username) {
 
     function buildHtml() {
       let html = `
-        <div class="logo">${Icons.link}<span>${esc(username)} 的短链接</span></div>
+        <div class="logo">${Icons.link}<span>${esc(ns)} 的短链接</span></div>
         <div class="card fade-in">
           <div class="search-bar">
             ${searchIcon}
@@ -739,7 +732,7 @@ async function renderList(username) {
         let deleted = 0;
         for (const id of ids) {
           try {
-            await api('DELETE', `${GIST_API}/${id}`);
+            await sb(`shortlinks?id=eq.${encodeURIComponent(id)}`, 'DELETE');
             addOptiDelete(id);
             deleted++;
           } catch (err) {
@@ -749,7 +742,7 @@ async function renderList(username) {
         if (deleted) toast(`已删除 ${deleted} / ${total} 项`, Icons.check);
         selected.clear();
         batchConfirming = false;
-        renderList(username);
+        renderList(ns);
       };
 
       $('#list-search').oninput = function() {
@@ -765,23 +758,26 @@ async function renderList(username) {
       if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> 加载中...`; }
 
       currentPage++;
-      const gists = await api('GET', `https://api.github.com/users/${username}/gists?per_page=${PER_PAGE}&page=${currentPage}`);
-      const items = gists.filter(g => g.files?.[DATA_FILE]);
-      hasMore = items.length === PER_PAGE;
+      const from = (currentPage - 1) * PER_PAGE;
+      const to = from + PER_PAGE - 1;
 
-      for (const g of items) {
-        allApiIds.add(g.id);
+      const items = await sb(`shortlinks?select=*&namespace=eq.${encodeURIComponent(ns)}&order=created_at.desc&limit=${PER_PAGE}&offset=${from}`, 'GET');
+
+      hasMore = (items || []).length === PER_PAGE;
+
+      for (const item of (items || [])) {
+        allApiIds.add(item.id);
         allApiItems.push({
-          id: g.id,
-          desc: (g.description || '').replace(/^\[sl\]\s*/, ''),
-          date: g.created_at ? g.created_at.slice(0, 10) : ''
+          id: item.id,
+          desc: item.description || '',
+          date: item.created_at ? item.created_at.slice(0, 10) : ''
         });
       }
       rebuildMerged();
 
       if (!merged.length && currentPage === 1) {
         app.innerHTML = `
-          <div class="logo">${Icons.link}<span>${esc(username)} 的短链接</span></div>
+          <div class="logo">${Icons.link}<span>${esc(ns)} 的短链接</span></div>
           <div class="card fade-in">
             <div class="empty-state">
               ${Icons.folder}
@@ -796,7 +792,6 @@ async function renderList(username) {
       bindEvents();
     }
 
-    // Kick off first page
     await loadNextPage();
   } catch (err) {
     app.innerHTML = `
@@ -828,14 +823,16 @@ function renderSettings() {
     <div class="card fade-in">
 
       <div class="settings-section">
-        <h3>GitHub Token</h3>
+        <h3>Supabase 配置</h3>
         <div class="settings-token">
-          ${Icons.key}
-          <span>${maskToken(token)}</span>
+          ${Icons.database}
+          <span>Supabase 已连接</span>
         </div>
+        <p class="dim spacer-sm">Project URL: ${esc(SUPABASE_URL.slice(0, 40))}…</p>
+        <p class="dim">Namespace: ${esc(namespace)}</p>
         <div class="flex spacer-sm">
-          <button class="btn-sm" id="change-token-btn">${Icons.settings} 更换</button>
-          <button class="btn-sm" id="clear-token-btn" style="color:var(--color-danger)">${Icons.trash} 清除</button>
+          <button class="btn-sm" id="change-config-btn">${Icons.settings} 更换配置</button>
+          <button class="btn-sm" id="clear-config-btn" style="color:var(--color-danger)">${Icons.trash} 清除配置</button>
         </div>
       </div>
 
@@ -868,8 +865,8 @@ function renderSettings() {
 
       <div class="settings-section">
         <h3>关于</h3>
-        <p class="muted">shortlink — 基于 GitHub Gist 的短链接工具</p>
-        <p class="dim spacer-sm">数据存储在 GitHub Gist，Token 仅在浏览器 localStorage。</p>
+        <p class="muted">shortlink — 基于 Supabase 的短链接工具</p>
+        <p class="dim spacer-sm">数据存储在 Supabase，配置仅在浏览器 localStorage。</p>
       </div>
 
     </div>
@@ -888,19 +885,21 @@ function renderSettings() {
     };
   });
 
-  // token actions
-  $('#change-token-btn').onclick = () => {
-    localStorage.removeItem('gh_token');
-    token = '';
-    render();
+  // config actions
+  $('#change-config-btn').onclick = () => {
+    localStorage.removeItem('sb_url');
+    localStorage.removeItem('sb_anon_key');
+    localStorage.removeItem('sb_namespace');
+    location.reload();
   };
 
-  $('#clear-token-btn').onclick = () => {
-    const btn = $('#clear-token-btn');
+  $('#clear-config-btn').onclick = () => {
+    const btn = $('#clear-config-btn');
     if (btn._confirming) {
-      localStorage.removeItem('gh_token');
-      token = '';
-      render();
+      localStorage.removeItem('sb_url');
+      localStorage.removeItem('sb_anon_key');
+      localStorage.removeItem('sb_namespace');
+      location.reload();
       return;
     }
     btn._confirming = true;
@@ -908,13 +907,13 @@ function renderSettings() {
     btn.innerHTML = `${Icons.alert} 确认清除`;
     const cancel = document.createElement('button');
     cancel.className = 'btn-sm';
-    cancel.id = 'clear-token-cancel';
+    cancel.id = 'clear-config-cancel';
     cancel.innerHTML = '取消';
     cancel.onclick = ev => {
       ev.stopPropagation();
       btn._confirming = false;
       btn.classList.remove('btn-danger-solid');
-      btn.innerHTML = `${Icons.trash} 清除`;
+      btn.innerHTML = `${Icons.trash} 清除配置`;
       cancel.remove();
     };
     btn.parentNode.insertBefore(cancel, btn.nextSibling);
@@ -925,8 +924,7 @@ function renderSettings() {
     const btn = $('#clear-data-btn');
     if (btn._confirming) {
       localStorage.clear();
-      token = '';
-      render();
+      location.reload();
       return;
     }
     btn._confirming = true;
@@ -961,13 +959,11 @@ render();
 
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
-  // close result card on home page
   const result = $('#result');
   if (result && result.style.display !== 'none') {
     result.style.display = 'none';
     return;
   }
-  // cancel edit mode on view page
   const cancelBtn = $('#cancel-edit-btn');
   if (cancelBtn) {
     cancelBtn.click();
