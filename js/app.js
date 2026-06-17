@@ -823,22 +823,6 @@ function renderSettings() {
     <div class="card fade-in">
 
       <div class="settings-section">
-        <h3>Supabase 配置</h3>
-        <div class="settings-token">
-          ${Icons.database}
-          <span>Supabase 已连接</span>
-        </div>
-        <p class="dim spacer-sm">Project URL: ${esc(SUPABASE_URL.slice(0, 40))}…</p>
-        <p class="dim">Namespace: ${esc(namespace)}</p>
-        <div class="flex spacer-sm">
-          <button class="btn-sm" id="change-config-btn">${Icons.settings} 更换配置</button>
-          <button class="btn-sm" id="clear-config-btn" style="color:var(--color-danger)">${Icons.trash} 清除配置</button>
-        </div>
-      </div>
-
-      <hr class="divider">
-
-      <div class="settings-section">
         <h3>主题</h3>
         <div class="theme-grid" id="theme-grid">
           ${THEMES.map(t => `
@@ -865,8 +849,7 @@ function renderSettings() {
 
       <div class="settings-section">
         <h3>关于</h3>
-        <p class="muted">shortlink — 基于 Supabase 的短链接工具</p>
-        <p class="dim spacer-sm">数据存储在 Supabase，配置仅在浏览器 localStorage。</p>
+        <p class="muted">shortlink — 轻量短链接工具</p>
       </div>
 
     </div>
@@ -884,40 +867,6 @@ function renderSettings() {
       renderSettings();
     };
   });
-
-  // config actions
-  $('#change-config-btn').onclick = () => {
-    localStorage.removeItem('sb_url');
-    localStorage.removeItem('sb_anon_key');
-    localStorage.removeItem('sb_namespace');
-    location.reload();
-  };
-
-  $('#clear-config-btn').onclick = () => {
-    const btn = $('#clear-config-btn');
-    if (btn._confirming) {
-      localStorage.removeItem('sb_url');
-      localStorage.removeItem('sb_anon_key');
-      localStorage.removeItem('sb_namespace');
-      location.reload();
-      return;
-    }
-    btn._confirming = true;
-    btn.classList.add('btn-danger-solid');
-    btn.innerHTML = `${Icons.alert} 确认清除`;
-    const cancel = document.createElement('button');
-    cancel.className = 'btn-sm';
-    cancel.id = 'clear-config-cancel';
-    cancel.innerHTML = '取消';
-    cancel.onclick = ev => {
-      ev.stopPropagation();
-      btn._confirming = false;
-      btn.classList.remove('btn-danger-solid');
-      btn.innerHTML = `${Icons.trash} 清除配置`;
-      cancel.remove();
-    };
-    btn.parentNode.insertBefore(cancel, btn.nextSibling);
-  };
 
   // clear all data
   $('#clear-data-btn').onclick = () => {
