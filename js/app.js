@@ -125,7 +125,69 @@ const Icons = {
   key: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`,
   alert: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
   database: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`,
+  upload: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
+  download: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+  close: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
 };
+
+// --- format file size ---
+function formatSize(bytes) {
+  if (!bytes) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  let size = bytes;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return size.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
+}
+
+// --- Supabase Storage helpers ---
+const STORAGE_BUCKET = 'files';
+
+async function sbStorageUpload(file, path) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(
+    `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${path}`,
+    {
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+      body: formData,
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    let msg;
+    try { msg = JSON.parse(text).message || text; } catch { msg = text; }
+    throw new Error(`上传失败: ${msg}`);
+  }
+  return res.json();
+}
+
+async function sbStorageDelete(path) {
+  const res = await fetch(
+    `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${path}`,
+    {
+      method: 'DELETE',
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      },
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    let msg;
+    try { msg = JSON.parse(text).message || text; } catch { msg = text; }
+    console.warn('删除存储文件失败:', msg);
+  }
+}
+
+function sbStoragePublicUrl(path) {
+  return `${SUPABASE_URL}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+}
 
 function toast(msg, icon) {
   let t = $('.toast');
@@ -215,6 +277,8 @@ function renderSetup() {
 }
 
 // -- home page --
+let uploadFiles = [];
+
 function renderHome() {
   app.innerHTML = `
     <div class="logo">${Icons.link}<span>shortlink</span></div>
@@ -229,6 +293,18 @@ function renderHome() {
         <span class="muted" id="img-count"></span>
       </div>
       <div class="previews" id="previews"></div>
+
+      <hr class="divider">
+      <label class="input-label">文件附件</label>
+      <div class="flex">
+        <label class="file-label" for="upload-file-input" tabindex="0" aria-label="上传文件">
+          ${Icons.upload} 选择文件
+        </label>
+        <input type="file" id="upload-file-input" multiple hidden>
+        <span class="muted" id="upload-file-count"></span>
+      </div>
+      <div class="upload-previews" id="upload-previews"></div>
+
       <button class="btn btn-primary spacer" id="create-btn" style="width:100%">
         ${Icons.link} 创建短链接
       </button>
@@ -251,8 +327,36 @@ function renderHome() {
     </div>
   `;
   files = [];
+  uploadFiles = [];
   renderPreviews();
+  renderUploadPreviews();
   bindHomeEvents();
+}
+
+function renderUploadPreviews() {
+  const container = $('#upload-previews');
+  if (!container) return;
+  container.innerHTML = '';
+  const count = $('#upload-file-count');
+  if (count) count.textContent = uploadFiles.length ? `${uploadFiles.length} 个文件` : '';
+
+  uploadFiles.forEach((f, i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'upload-item fade-in';
+    wrap.innerHTML = `
+      <div class="upload-item-icon">${Icons.upload}</div>
+      <div class="upload-item-info">
+        <span class="upload-item-name">${esc(f.name)}</span>
+        <span class="upload-item-size">${formatSize(f.size)}</span>
+      </div>
+      <button class="upload-item-del" data-idx="${i}" aria-label="移除文件">${Icons.close}</button>
+    `;
+    wrap.querySelector('.upload-item-del').onclick = () => {
+      uploadFiles.splice(i, 1);
+      renderUploadPreviews();
+    };
+    container.appendChild(wrap);
+  });
 }
 
 function bindHomeEvents() {
@@ -261,6 +365,24 @@ function bindHomeEvents() {
     files.push(...fi.files);
     fi.value = '';
     renderPreviews();
+  };
+
+  const ufi = $('#upload-file-input');
+  ufi.onchange = () => {
+    const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+    const oversized = [];
+    for (const f of ufi.files) {
+      if (f.size > MAX_FILE_SIZE) {
+        oversized.push(f.name);
+      } else {
+        uploadFiles.push(f);
+      }
+    }
+    ufi.value = '';
+    if (oversized.length) {
+      toast(`${oversized.join(', ')} 超过 50MB 限制，已跳过`, Icons.alert);
+    }
+    renderUploadPreviews();
   };
 
   $('#create-btn').onclick = createShortlink;
@@ -308,19 +430,47 @@ async function createShortlink() {
 
   try {
     const text = $('#text-input').value.trim();
-    if (!text && !files.length) {
+    if (!text && !files.length && !uploadFiles.length) {
       btn.disabled = false;
       btn.innerHTML = origHTML;
-      return toast('至少写点文字或传张图片', Icons.alert);
+      return toast('至少写点文字、传张图片或上传文件', Icons.alert);
     }
     const images = await Promise.all(files.map(compressImage));
 
-    const preview = text ? text.slice(0, 60).replace(/\n/g, ' ') : (images.length ? `[${images.length} images]` : '');
+    // Upload files to Supabase Storage
+    const fileEntries = [];
+    if (uploadFiles.length) {
+      btn.innerHTML = `<span class="spinner"></span> 上传文件中 (${0}/${uploadFiles.length})...`;
+      for (let i = 0; i < uploadFiles.length; i++) {
+        const f = uploadFiles[i];
+        const timeStr = Date.now().toString(36);
+        const safeName = `${timeStr}_${f.name.replace(/[^\w.\-]/g, '_')}`;
+        const storagePath = `${namespace}/${safeName}`;
+        try {
+          await sbStorageUpload(f, storagePath);
+          fileEntries.push({
+            name: f.name,
+            size: f.size,
+            type: f.type,
+            key: storagePath,
+            url: sbStoragePublicUrl(storagePath),
+          });
+        } catch (upErr) {
+          toast(`上传 ${f.name} 失败: ${upErr.message}`, Icons.alert);
+        }
+        btn.innerHTML = `<span class="spinner"></span> 上传文件中 (${i + 1}/${uploadFiles.length})...`;
+      }
+    }
+
+    const preview = text ? text.slice(0, 60).replace(/\n/g, ' ') :
+      (images.length ? `[${images.length} images]` :
+        (fileEntries.length ? `[${fileEntries.length} files]` : ''));
     const created = new Date().toISOString();
 
     const rows = await sb('shortlinks', 'POST', {
       text,
       images,
+      files: fileEntries,
       description: preview,
       namespace,
       created,
@@ -337,7 +487,9 @@ async function createShortlink() {
     $('#result').style.display = 'block';
     $('#text-input').value = '';
     files = [];
+    uploadFiles = [];
     renderPreviews();
+    renderUploadPreviews();
 
     $('#copy-btn').onclick = () => { navigator.clipboard.writeText(url); toast('已复制', Icons.check); };
     $('#new-btn').onclick = () => { $('#result').style.display = 'none'; };
@@ -381,6 +533,9 @@ async function renderView(linkId) {
     incrementView(linkId);
     const date = data.created ? data.created.slice(0, 16).replace('T', ' ') : '';
     let editFiles = [];
+    let editUploadFiles = [];
+    let newEditUploadFiles = [];
+    let removedExistingKeys;
 
     function renderViewMode() {
       let html = `
@@ -401,7 +556,24 @@ async function renderView(linkId) {
         });
         html += `</div>`;
       }
-      if (!data.text && !data.images?.length) {
+      if (data.files?.length) {
+        html += `<div class="view-files">`;
+        data.files.forEach((f, i) => {
+          const iconSvg = f.type?.startsWith('image/') ? Icons.image : Icons.download;
+          html += `
+            <a class="file-attachment" href="${esc(f.url)}" target="_blank" rel="noopener" download>
+              <span class="file-attach-icon">${iconSvg}</span>
+              <span class="file-attach-info">
+                <span class="file-attach-name">${esc(f.name)}</span>
+                <span class="file-attach-size">${formatSize(f.size)}</span>
+              </span>
+              ${Icons.download}
+            </a>
+          `;
+        });
+        html += `</div>`;
+      }
+      if (!data.text && !data.images?.length && !data.files?.length) {
         html += `<div class="empty-state"><p class="muted">没有内容</p></div>`;
       }
 
@@ -414,8 +586,60 @@ async function renderView(linkId) {
       bindViewActions();
     }
 
+    function renderEditUploadPreviews() {
+      const c = $('#edit-upload-previews');
+      if (!c) return;
+      c.innerHTML = '';
+      const count = $('#edit-upload-count');
+      if (count) count.textContent = newEditUploadFiles.length ? `${newEditUploadFiles.length} 个新文件` : '';
+
+      // Show existing files still kept
+      editUploadFiles.forEach((f, i) => {
+        if (removedExistingKeys.has(f.key)) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'upload-item fade-in';
+        wrap.innerHTML = `
+          <div class="upload-item-icon">${Icons.download}</div>
+          <div class="upload-item-info">
+            <span class="upload-item-name">${esc(f.name)}</span>
+            <span class="upload-item-size">${formatSize(f.size)}</span>
+          </div>
+          <button class="upload-item-del" aria-label="移除文件">${Icons.close}</button>
+        `;
+        wrap.querySelector('.upload-item-del').onclick = () => {
+          removedExistingKeys.add(f.key);
+          renderEditUploadPreviews();
+        };
+        c.appendChild(wrap);
+      });
+
+      // Show newly added files
+      newEditUploadFiles.forEach((f, i) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'upload-item fade-in';
+        wrap.innerHTML = `
+          <div class="upload-item-icon">${Icons.upload}</div>
+          <div class="upload-item-info">
+            <span class="upload-item-name">${esc(f.name)}</span>
+            <span class="upload-item-size">${formatSize(f.size)}</span>
+            <span class="upload-item-new">新文件</span>
+          </div>
+          <button class="upload-item-del" aria-label="移除文件">${Icons.close}</button>
+        `;
+        wrap.querySelector('.upload-item-del').onclick = () => {
+          newEditUploadFiles.splice(i, 1);
+          renderEditUploadPreviews();
+        };
+        c.appendChild(wrap);
+      });
+    }
+
     function renderEditMode() {
       editFiles = [];
+      editUploadFiles = data.files ? [...data.files] : [];
+      newEditUploadFiles = [];
+      removedExistingKeys = new Set();
+
       let html = `
         <div class="card fade-in">
         <div class="view-meta">
@@ -434,6 +658,17 @@ async function renderView(linkId) {
           <span class="muted" id="edit-img-count"></span>
         </div>
         <div class="previews" id="edit-previews"></div>
+
+        <hr class="divider">
+        <label class="input-label">文件附件</label>
+        <div class="flex">
+          <label class="file-label" for="edit-upload-file-input" tabindex="0" aria-label="上传新文件">
+            ${Icons.upload} 添加文件
+          </label>
+          <input type="file" id="edit-upload-file-input" multiple hidden>
+          <span class="muted" id="edit-upload-count"></span>
+        </div>
+        <div class="upload-previews" id="edit-upload-previews"></div>
       `;
 
       if (data.images?.length) {
@@ -455,6 +690,7 @@ async function renderView(linkId) {
       html += `</div></div>`;
       app.innerHTML = html;
       bindEditActions();
+      renderEditUploadPreviews();
     }
 
     function renderEditPreviews() {
@@ -489,6 +725,26 @@ async function renderView(linkId) {
         };
       }
 
+      const eufi = $('#edit-upload-file-input');
+      if (eufi) {
+        eufi.onchange = () => {
+          const MAX_FILE_SIZE = 50 * 1024 * 1024;
+          const oversized = [];
+          for (const f of eufi.files) {
+            if (f.size > MAX_FILE_SIZE) {
+              oversized.push(f.name);
+            } else {
+              newEditUploadFiles.push(f);
+            }
+          }
+          eufi.value = '';
+          if (oversized.length) {
+            toast(`${oversized.join(', ')} 超过 50MB 限制，已跳过`, Icons.alert);
+          }
+          renderEditUploadPreviews();
+        };
+      }
+
       $$('#existing-previews .edit-wrap').forEach(wrap => {
         wrap.onclick = () => {
           const idx = parseInt(wrap.dataset.idx);
@@ -504,21 +760,64 @@ async function renderView(linkId) {
 
         try {
           const textVal = $('#edit-text').value.trim();
-          if (!textVal && !data.images?.length && !editFiles.length) {
+          if (!textVal && !data.images?.length && !editFiles.length && !newEditUploadFiles.length && editUploadFiles.filter(f => !removedExistingKeys.has(f.key)).length === 0) {
             btn.disabled = false;
             btn.innerHTML = `${Icons.check} 保存修改`;
-            return toast('至少需要文字或图片', Icons.alert);
+            return toast('至少需要文字、图片或文件', Icons.alert);
           }
 
           const newImages = editFiles.length ? await Promise.all(editFiles.map(compressImage)) : [];
           const newText = textVal;
           const newImagesArr = newImages.length ? [...(data.images || []), ...newImages] : (data.images || []);
 
-          const desc = newText ? newText.slice(0, 60).replace(/\n/g, ' ') : (newImagesArr.length ? `[${newImagesArr.length} images]` : '');
+          // Upload new files
+          const newFileEntries = [];
+          if (newEditUploadFiles.length) {
+            btn.innerHTML = `<span class="spinner"></span> 上传文件 (${0}/${newEditUploadFiles.length})...`;
+            for (let i = 0; i < newEditUploadFiles.length; i++) {
+              const f = newEditUploadFiles[i];
+              const timeStr = Date.now().toString(36);
+              const safeName = `${timeStr}_${f.name.replace(/[^\w.\-]/g, '_')}`;
+              const storagePath = `${namespace}/${safeName}`;
+              try {
+                await sbStorageUpload(f, storagePath);
+                newFileEntries.push({
+                  name: f.name,
+                  size: f.size,
+                  type: f.type,
+                  key: storagePath,
+                  url: sbStoragePublicUrl(storagePath),
+                });
+              } catch (upErr) {
+                toast(`上传 ${f.name} 失败: ${upErr.message}`, Icons.alert);
+              }
+              btn.innerHTML = `<span class="spinner"></span> 上传文件 (${i + 1}/${newEditUploadFiles.length})...`;
+            }
+          }
 
-          await sb(`shortlinks?id=eq.${encodeURIComponent(linkId)}`, 'PATCH', { text: newText, images: newImagesArr, description: desc });
+          // Build final files array: keep existing not removed + new uploads
+          const keptFiles = editUploadFiles.filter(f => !removedExistingKeys.has(f.key));
+          const finalFiles = [...keptFiles, ...newFileEntries];
+
+          // Delete removed files from storage
+          for (const key of removedExistingKeys) {
+            sbStorageDelete(key).catch(() => {});
+          }
+
+          const desc = newText ? newText.slice(0, 60).replace(/\n/g, ' ') :
+            (newImagesArr.length ? `[${newImagesArr.length} images]` :
+              (finalFiles.length ? `[${finalFiles.length} files]` : ''));
+
+          await sb(`shortlinks?id=eq.${encodeURIComponent(linkId)}`, 'PATCH', {
+            text: newText,
+            images: newImagesArr,
+            files: finalFiles,
+            description: desc
+          });
 
           toast('已保存', Icons.check);
+          // Update data.files for next edit
+          data.files = finalFiles;
           renderViewMode();
         } catch (err) {
           toast(err.message, Icons.alert);
@@ -557,6 +856,12 @@ async function renderView(linkId) {
             return;
           }
           try {
+            // Clean up uploaded files from storage
+            if (data.files?.length) {
+              for (const f of data.files) {
+                if (f.key) sbStorageDelete(f.key).catch(() => {});
+              }
+            }
             await sb(`shortlinks?id=eq.${encodeURIComponent(linkId)}`, 'DELETE');
 
             addOptiDelete(linkId);
